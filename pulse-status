@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+
+import click
+import json
+import os
+import pytz
+import requests
+from collections import defaultdict
+from datetime import datetime
+
+
+# Constants
+JIRA_BASE_URL = os.environ["JIRA_BASE_URL"]
+JIRA_PROJECT = os.environ["JIRA_PROJECT"]
+API_TOKEN = os.environ["JIRA_API_TOKEN"]
+EMAIL = os.environ["JIRA_EMAIL"]
+
+
+#
+# Simple cache to speed up iterating on message formating
+#
+CACHE_FILE = ".jira_cache.json"
+
+
+def load_cache():
+    """Load cache from disk if it exists"""
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def save_cache(cache_data):
+    """Save cache to disk"""
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache_data, f)
+
+
+def update_cache(key, value, cache_dict):
+    """Update cache with new value and save to disk"""
+    cache_dict[key] = value
+    save_cache(_JIRA_CACHE)
+
+
+# /Cache
+
+
+#
+# Jira helpers
+#
+def parse_jira_timestamp(timestamp: str) -> datetime:
+    """Parses a JIRA timestamp in 'YYYY-MM-DDTHH:MM:SS.sssZ' format into a datetime object."""
+    return datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%f%z")
+
+
+def get_jira_issue(issue_key):
+    """Fetch issue details from Jira"""
+    _cache = _JIRA_CACHE
+    if issue_key in _cache:
+        return _cache[issue_key]
+
+    url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}"
+    response = requests.get(
+        url, auth=(EMAIL, API_TOKEN), headers={"Accept": "application/json"}
+    )
+    response.raise_for_status()
+    _cache[issue_key] = response.json()
+    return _cache[issue_key]
+
+
+def search_issues(jql_query):
+    _cache = _JIRA_CACHE
+
+    """Fetch issues based on a JQL query"""
+    if jql_query in _cache:
+        return _cache[jql_query]
+
+    url = f"{JIRA_BASE_URL}/rest/api/3/search"
+    params = {
+        "jql": jql_query,
+        "fields": "summary,assignee,status,parent,resolutiondate",
+    }
+    response = requests.get(
+        url,
+        auth=(EMAIL, API_TOKEN),
+        headers={"Accept": "application/json"},
+        params=params,
+    )
+    response.raise_for_status()
+    _cache[jql_query] = response.json()["issues"]
+    return _cache[jql_query]
+
+
+def get_epic_issues(epic_key):
+    """Fetch issues linked to an epic"""
+    jql_query = f'"Epic Link" = {epic_key}'
+    return search_issues(jql_query)
+
+
+def is_status_valid(status):
+    """Check if the status is valid (not 'Done' or 'Untriaged')"""
+    return status not in ["Done", "Untriaged", "Rejected"]
+
+
+def get_assignee(issue):
+    """Get the assignee of an issue"""
+    return (
+        issue["fields"]["assignee"]["displayName"]
+        if issue["fields"]["assignee"]
+        else "not assigned yet"
+    )
+
+
+def generate_jira_link(label, issue_key):
+    """Generate a markdown link to Jira with the Jira emoticon"""
+    return f"[{label}]({JIRA_BASE_URL}/browse/{issue_key})"
+
+
+# /Jira helpers
+
+
+#
+# Application
+#
+
+
+def generate_markdown_table(data):
+    """Generate a markdown table from the collected data"""
+    if not data:
+        return "No issues found."
+
+    n = 0
+    output = ""
+
+    for objective, epics in data.items():
+        output += f"- {objective}"
+        for epic, issues in epics.items():
+            n += len(issues)
+            if len(issues) == 1:
+                if len(epics) == 1:
+                    output += f" / {epic} / {issues[0]}\n"
+                else:
+                    output += f"\n  - {epic} / {issues[0]}\n"
+            else:
+                output += "\n"
+                if len(epics) > 1:
+                    output += f"  - {epic}\n"
+                for issue in issues:
+                    output += f"    - {issue}\n"
+
+    return n, output
+
+
+def collect_issues(done_since: datetime = None):
+    """Collect and organize all issues"""
+    in_review = defaultdict(lambda: defaultdict(list))
+    in_progress = defaultdict(lambda: defaultdict(list))
+    triaged = defaultdict(lambda: defaultdict(list))
+    done = defaultdict(lambda: defaultdict(list))
+
+    objectives = [
+        o["key"]
+        for o in search_issues(
+            f"project = '{JIRA_PROJECT}' AND type = 'Objective' AND status = 'In Progress'"
+        )
+    ]
+
+    for objective_key in objectives:
+        objective_issue = get_jira_issue(objective_key)
+        objective_title = f"{generate_jira_link(':jira-objective:', objective_key)} {objective_issue['fields']['summary']}"
+
+        epic_issues = search_issues(f"'parent' = {objective_key}")
+
+        for epic in epic_issues:
+            if not is_status_valid(epic["fields"]["status"]["name"]):
+                continue
+
+            epic_key = epic["key"]
+            epic_title = f"{generate_jira_link(':jira-epic:', epic_key)} {epic['fields']['summary']}"
+            epic_status = epic["fields"]["status"]["name"].lower()
+
+            linked_issues = get_epic_issues(epic_key)
+
+            for issue in linked_issues:
+                issue_status = issue["fields"]["status"]["name"].lower()
+
+                if not is_status_valid(issue_status):
+                    continue
+
+                # issue_title = f"[{issue['key']}] {issue['fields']['summary']}"
+                issue_title = f"{generate_jira_link(':jira-story:', issue['key'])} {issue['fields']['summary']} (*{get_assignee(issue)}*)"
+                if issue_status in ["in review", "to be deployed"]:
+                    in_review[objective_title][epic_title].append(issue_title)
+                elif issue_status == "in progress":
+                    in_progress[objective_title][epic_title].append(issue_title)
+                elif issue_status == "triaged":
+                    triaged[objective_title][epic_title].append(issue_title)
+                elif issue_status == "done":
+                    resolution_date = issue["fields"]["resolutiondate"]
+                    resolution_date = parse_jira_timestamp(resolution_date)
+
+                    if done_since and resolution_date >= done_since:
+                        done[objective_title][epic_title].append(issue_title)
+                elif issue_status in ["done", "rejected", "untriaged"]:
+                    pass
+                else:
+                    print(f"Unknown status: {issue_status}")
+
+    return in_review, in_progress, triaged, done
+
+
+#
+# CLI
+#
+
+# Initialize cache
+_JIRA_CACHE = load_cache()
+
+
+@click.group
+def cli():
+    pass
+
+
+@cli.command
+def planning():
+    try:
+        in_review, in_progress, triaged, done = collect_issues()
+
+        msg = """Hi. Here is an overview of what we plan to achieve during this pulse based on jira. 
+The goal is for everybody to know who is working on what, to remind us what we should complete before starting new stories, and in parallel to ensure that our Jira is matching reality ;) 
+Please provide feedback in you see any inconsistencies (especially things missing), or if you have any comments ;).\n"""
+
+        msg += "**First, here are the main topics under review or to be deployed that we will complete:**\n"
+        n_review, txt = generate_markdown_table(in_review)
+        msg += txt
+
+        msg += "\n**Second, here are the topics in progress we aim to finish during the pulse:**\n"
+        n_progress, txt = generate_markdown_table(in_progress)
+        msg += txt
+
+        msg += "\n**And last, here are the items already triaged that we will start next:**\n"
+        n_triaged, txt = generate_markdown_table(triaged)
+        msg += txt
+
+        print(msg)
+
+        print(
+            f"{n_review} in review + {n_progress} in progress + {n_triaged} triaged = {n_review + n_progress + n_triaged} issues"
+        )
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error communicating with Jira API: {e}")
+
+    save_cache(_JIRA_CACHE)
+
+
+@cli.command()
+@click.option("-s", "--since", type=click.DateTime(formats=["%d-%m-%Y"]), required=True)
+def retro(since):
+    since = since.replace(tzinfo=pytz.utc)
+    _, _, _, done = collect_issues(since)
+    n_done, txt = generate_markdown_table(done)
+    print(txt)
+    print(f"Done: {n_done} issues")
+
+
+if __name__ == "__main__":
+    cli()
+    save_cache()
