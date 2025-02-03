@@ -227,14 +227,15 @@ def cli():
 
 @cli.command
 def planning():
+    """Generate a markdown message with planned work."""
     try:
         in_review, in_progress, triaged, done = collect_issues()
 
-        msg = """Hi. Here is an overview of what we plan to achieve during this pulse based on jira. 
+        msg = """Hi. Here is an overview of what we plan to achieve during this pulse based on Jira. 
 The goal is for everybody to know who is working on what, to remind us what we should complete before starting new stories, and in parallel to ensure that our Jira is matching reality ;) 
-Please provide feedback in you see any inconsistencies (especially things missing), or if you have any comments ;).\n"""
+Please have a look and update Jira if you spot some inconsistencies.\n"""
 
-        msg += "**First, here are the main topics under review or to be deployed that we will complete:**\n"
+        msg += "**First, here are the main topics under review or to be deployed that we will focus on:**\n"
         n_review, txt = generate_markdown_table(in_review)
         msg += txt
 
@@ -261,6 +262,7 @@ Please provide feedback in you see any inconsistencies (especially things missin
 @cli.command()
 @click.option("-s", "--since", type=click.DateTime(formats=["%d-%m-%Y"]), required=True)
 def retro(since):
+    """Generate a markdown message with Done work."""
     since = since.replace(tzinfo=pytz.utc)
     _, _, _, done = collect_issues(since)
     n_done, txt = generate_markdown_table(done)
