@@ -7,6 +7,7 @@ import pytz
 import requests
 from collections import defaultdict
 from datetime import datetime
+from loguru import logger
 
 
 # Constants
@@ -15,6 +16,7 @@ JIRA_PROJECT = os.environ["JIRA_PROJECT"]
 API_TOKEN = os.environ["JIRA_API_TOKEN"]
 EMAIL = os.environ["JIRA_EMAIL"]
 
+logger.add("pulse-status.log", format="[{time}] {level} {message}", level="DEBUG")
 
 #
 # Simple cache to speed up iterating on message formating
@@ -169,13 +171,16 @@ def collect_issues(done_since: datetime = None):
     ]
 
     for objective_key in objectives:
+        logger.debug(f"Processing objective {objective_key}")
         objective_issue = get_jira_issue(objective_key)
         objective_title = f"{generate_jira_link(':jira-objective:', objective_key)} {objective_issue['fields']['summary']}"
 
         epic_issues = search_issues(f"'parent' = {objective_key}")
 
         for epic in epic_issues:
+            logger.debug(f"  Processing epic {epic['key']}")
             if not is_status_valid(epic["fields"]["status"]["name"]):
+                logger.debug(f"  Skipping epic {epic['key']}")
                 continue
 
             epic_key = epic["key"]
@@ -185,26 +190,32 @@ def collect_issues(done_since: datetime = None):
             linked_issues = get_epic_issues(epic_key)
 
             for issue in linked_issues:
+                logger.debug(f"    Processing issue {issue['key']}")
                 issue_status = issue["fields"]["status"]["name"].lower()
 
                 if not is_status_valid(issue_status):
+                    logger.debug(f"    Skipping {issue['key']}")
                     continue
 
                 # issue_title = f"[{issue['key']}] {issue['fields']['summary']}"
                 issue_title = f"{generate_jira_link(':jira-story:', issue['key'])} {issue['fields']['summary']} (*{get_assignee(issue)}*)"
                 if issue_status in ["in review", "to be deployed"]:
+                    logger.debug(f"      Issue {issue['key']} in review")
                     in_review[objective_title][epic_title].append(issue_title)
                 elif issue_status == "in progress":
+                    logger.debug(f"      Issue {issue['key']} in progress")
                     in_progress[objective_title][epic_title].append(issue_title)
                 elif issue_status == "triaged":
+                    logger.debug(f"     Issue {issue['key']} triaged")
                     triaged[objective_title][epic_title].append(issue_title)
                 elif issue_status == "done":
+                    logger.debug(f"     Issue {issue['key']} done")
                     resolution_date = issue["fields"]["resolutiondate"]
                     resolution_date = parse_jira_timestamp(resolution_date)
 
                     if done_since and resolution_date >= done_since:
                         done[objective_title][epic_title].append(issue_title)
-                elif issue_status in ["done", "rejected", "untriaged"]:
+                elif issue_status in ["rejected", "untriaged"]:
                     pass
                 else:
                     print(f"Unknown status: {issue_status}")
