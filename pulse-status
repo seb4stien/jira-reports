@@ -5,6 +5,7 @@ import json
 import os
 import pytz
 import requests
+from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
 from loguru import logger
@@ -16,6 +17,7 @@ JIRA_PROJECT = os.environ["JIRA_PROJECT"]
 API_TOKEN = os.environ["JIRA_API_TOKEN"]
 EMAIL = os.environ["JIRA_EMAIL"]
 CACHE_FILE = ".jira_cache.json"
+CONFIG_FILE = "config.json"
 
 logger.add("pulse-status.log", format="[{time}] {level} {message}", level="DEBUG")
 
@@ -128,6 +130,8 @@ class Jira:
             icon = ":jira-spike:"
         elif issue["fields"]["issuetype"]["name"] == "Bug":
             icon = ":jira-bug:"
+        elif issue["fields"]["issuetype"]["name"] == "Sub-task":
+            icon = ":jira-sub-task:"
         else:
             raise ValueError(
                 f"Unsupported issue type: {issue['fields']['issuetype']['name']}"
@@ -256,6 +260,15 @@ def collect_issues(done_since: datetime = None):
     return in_review, in_progress, triaged, done, flat
 
 
+def load_config():
+    config_file = Path(CONFIG_FILE)
+    if not config_file.exists():
+        print(f"You need a {CONFIG_FILE}.")
+        exit(1)
+
+    return json.load(config_file.open())
+
+
 #
 # CLI
 #
@@ -269,22 +282,23 @@ def cli():
 @cli.command
 def planning():
     """Generate a markdown message with planned work."""
+
+    config = load_config()
+
     try:
         in_review, in_progress, triaged, done, flat = collect_issues()
 
-        msg = """Hi. Here is an overview of what we plan to achieve during this pulse based on Jira. 
-The goal is for everybody to know who is working on what, to remind us what we should complete before starting new stories, and in parallel to ensure that our Jira is matching reality ;) 
-Please have a look and update Jira if you spot some inconsistencies.\n"""
+        msg = config["intro"]
 
-        msg += "**First, here are the main topics under review or to be deployed that we will focus on:**\n"
+        msg += config["in_review"]
         n_review, txt = generate_markdown_table(in_review)
         msg += txt
 
-        msg += "\n**Second, here are the topics in progress we aim to finish during the pulse:**\n"
+        msg += config["in_progress"]
         n_progress, txt = generate_markdown_table(in_progress)
         msg += txt
 
-        msg += "\n**And last, here are the items already triaged that we will start next:**\n"
+        msg += config["triaged"]
         n_triaged, txt = generate_markdown_table(triaged)
         msg += txt
 
@@ -313,7 +327,7 @@ def retro(since):
     flat_keys = [issue["key"] for issue in flat]
     jira_date = since.strftime("%Y-%m-%d")
     non_objective_done = jira.search_issues(
-        f"project = ISD and resolution IS NOT EMPTY AND resolved >= '{jira_date}' AND resolution = Done"
+        f"project = {JIRA_PROJECT} and resolution IS NOT EMPTY AND resolved >= '{jira_date}' AND resolution = Done"
     )
     for issue in non_objective_done:
         key = issue["key"]

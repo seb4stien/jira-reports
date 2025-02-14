@@ -1,0 +1,6 @@
+{
+	"intro": "Hi. Here is an overview of what we plan to achieve during this pulse\n", 
+	"in_review": "**First, here are the main topics under review:**\n",
+	"in_progress": "\n**Second, here are the topics in progress:**\n",
+	"triaged": "\n**And last, here are the items already triaged:**\n"
+}
